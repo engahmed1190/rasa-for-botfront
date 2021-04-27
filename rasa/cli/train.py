@@ -78,7 +78,20 @@ def train(args: argparse.Namespace, can_exit: bool = False) -> Optional[Text]:
         args.domain, "domain", DEFAULT_DOMAIN_PATH, none_is_valid=True
     )
 
-    config = _get_valid_config(args.config, CONFIG_MANDATORY_KEYS)
+    # bf
+    if os.path.isdir(args.config):
+        from rasa.telemetry import TELEMETRY_ENABLED_ENVIRONMENT_VARIABLE
+        from pathlib import Path
+
+        os.environ[TELEMETRY_ENABLED_ENVIRONMENT_VARIABLE] = "false"
+        config = [
+            Path(args.config) / f
+            for f in os.listdir(args.config)
+            if f.startswith("config") and f.endswith(("yml", "yaml"))
+        ]
+    else:
+        config = _get_valid_config(args.config, CONFIG_MANDATORY_KEYS)
+    # /bf
 
     training_files = [
         rasa.cli.utils.get_validated_path(
@@ -113,6 +126,8 @@ def _model_for_finetuning(args: argparse.Namespace) -> Optional[Text]:
         # didn't provide a path to a model. In this case we try to load the latest
         # model from the output directory (that's usually models/).
         return args.out
+    else:
+        return args.finetune
 
 
 def train_core(

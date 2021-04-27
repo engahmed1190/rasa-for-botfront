@@ -537,7 +537,7 @@ def async_if_callback_url(f: Callable[..., Coroutine]) -> Callable:
                     )
                 # If an error happens, we send the error payload to the `callback_url`
                 payload = dict(json=e.error_info)
-                logger.debug(
+                logger.error(
                     "Error happened when processing request asynchronously. "
                     "Sending error to callback URL."
                 )
@@ -1006,10 +1006,12 @@ def create_app(
             "train your model.",
         )
 
+        load_model_after = request.args.get("load_model_after", False)
         if request.headers.get("Content-type") == YAML_CONTENT_TYPE:
             training_payload = _training_payload_from_yaml(request, temporary_directory)
         else:
             training_payload = _training_payload_from_json(request, temporary_directory)
+            load_model_after = request.json.get("load_model_after", load_model_after)
 
         try:
             with app.active_training_processes.get_lock():
@@ -1022,6 +1024,15 @@ def create_app(
 
             if training_result.model:
                 filename = os.path.basename(training_result.model)
+
+                if load_model_after is True:
+                    app.agent = await _load_agent(
+                        training_result.model,
+                        endpoints=endpoints,
+                        lock_store=app.agent.lock_store,
+                    )
+
+                    logger.debug(f"Successfully loaded model '{filename}'.")
 
                 return await response.file(
                     training_result.model,
@@ -1123,7 +1134,9 @@ def create_app(
 
         if not cross_validation_folds:
             test_coroutine = _evaluate_model_using_test_set(
-                request.args.get("model"), test_data, request.args.get("language"), # bf
+                request.args.get("model"),
+                test_data,
+                request.args.get("language"),  # bf
             )
 
         try:
@@ -1138,8 +1151,10 @@ def create_app(
             )
 
     async def _evaluate_model_using_test_set(
-        model_path: Text, test_data_file: Text, language: Text, # bf
+        model_path: Text, test_data_file: Text, language: Text,  # bf
     ) -> Dict:
+        logger.info("Starting model evaluation using test set.")
+
         eval_agent = app.agent
 
         if model_path:
@@ -1183,9 +1198,7 @@ def create_app(
                 model_directory, f"{classifier}_errors.json"
             )
             if os.path.isfile(entity_errors_file):
-                entity_errors = rasa.shared.utils.io.read_json_file(
-                    entity_errors_file
-                )
+                entity_errors = rasa.shared.utils.io.read_json_file(entity_errors_file)
                 evaluation["entity_evaluation"][classifier][
                     "predictions"
                 ] = entity_errors
@@ -1193,6 +1206,7 @@ def create_app(
         # </ bf
 
     async def _cross_validate(data_file: Text, config_file: Text, folds: int) -> Dict:
+        logger.info(f"Starting cross-validation with {folds} folds.")
         importer = TrainingDataImporter.load_from_dict(
             config=None, config_path=config_file, training_data_paths=[data_file]
         )
@@ -1396,16 +1410,15 @@ def create_app(
         out_path = os.path.join(temp_dir, f"input_converted.{output_format}")
 
         if type(data) is dict:
-            rasa.shared.utils.io.dump_obj_as_json_to_file(in_path, data)
+            rasa.shared.utils.io.dump_obj_as_json_to_file(
+                in_path, _split_metadata(data)
+            )
         else:
             rasa.shared.utils.io.write_text_file(data, in_path)
 
         if data_type == "nlu":
             await request.app.loop.run_in_executor(
-                None,
-                partial(
-                    _convert_nlu_training_data, in_path, out_path, language
-                ),
+                None, partial(_convert_nlu_training_data, in_path, out_path, language),
             )
         else:
             await _convert_core_training_data(in_path, out_path)
@@ -1413,22 +1426,40 @@ def create_app(
         if output_format == "json":
             data = rasa.shared.utils.io.read_json_file(out_path)
             if data_type == "nlu":
-                # rasa has a weird structured way to manage metadata so we flatten it
-                examples_with_proper_metadata = []
-                for example in data.get("rasa_nlu_data").get("common_examples", []):
-                    metadata = example.pop("metadata", {})
-                    metadata.update(metadata.pop("intent", {}))
-                    metadata.update(metadata.pop("example", {}))
-                    examples_with_proper_metadata.append(
-                        {**example, "metadata": metadata}
-                    )
-                data["rasa_nlu_data"]["common_examples"] = examples_with_proper_metadata
+                data = _merge_metadata(data)
         else:
             data = rasa.shared.utils.io.read_file(out_path)
 
         return response.json({"data": data})
 
     return app
+
+
+def _merge_metadata(data):
+    # rasa has a weird structured way to manage metadata so we flatten it
+    examples_with_proper_metadata = []
+    for example in data.get("rasa_nlu_data").get("common_examples", []):
+        metadata = example.pop("metadata", {})
+        metadata.update(metadata.pop("intent", {}))
+        metadata.update(metadata.pop("example", {}))
+        examples_with_proper_metadata.append({**example, "metadata": metadata})
+    data["rasa_nlu_data"]["common_examples"] = examples_with_proper_metadata
+    return data
+
+
+def _split_metadata(data):
+    common_examples = data.get("rasa_nlu_data", {}).get("common_examples", [])
+    if not common_examples:
+        return data
+    for ex in common_examples:
+        metadata = ex.get("metadata", {})
+        language = metadata.pop("language", None)
+        metadata = {"example": metadata} if metadata else {}
+        if language:
+            metadata["intent"] = {"language": language}
+        ex["metadata"] = metadata
+    data["rasa_nlu_data"]["common_examples"] = common_examples
+    return data
 
 
 def _parse_convert_request(request: Request, data_type: Text):
@@ -1638,7 +1669,7 @@ def _training_payload_from_json(
         domain=domain_path,
         config=config_paths,  # bf
         training_files=str(temp_dir),
-        output=model_output_directory,
+        output=os.environ.get("MODEL_PATH", DEFAULT_MODELS_PATH),  # bf
         force_training=request_payload.get(
             "force", request.args.get("force_training", False)
         ),

@@ -32,12 +32,6 @@ ENV PATH "/root/.poetry/bin:/opt/venv/bin:${PATH}"
 
 # copy files
 COPY . /build/
-COPY docker/configs/config_pretrained_embeddings_spacy_en_duckling.yml /build/config.yml
-
-# download mitie model
-RUN wget -P /build/data/ https://github.com/mit-nlp/MITIE/releases/download/v0.4/MITIE-models-v0.2.tar.bz2 && \
-  tar -xvjf /build/data/MITIE-models-v0.2.tar.bz2 --strip-components 2 -C /build/data/ MITIE-models/english/total_word_feature_extractor.dat && \
-  rm /build/data/MITIE*.bz2
 
 # change working directory
 WORKDIR /build
@@ -46,20 +40,18 @@ WORKDIR /build
 RUN python -m venv /opt/venv && \
   . /opt/venv/bin/activate && \
   pip install --no-cache-dir -U 'pip<20' && \
-  poetry install --extras full --no-dev --no-root --no-interaction && \
-  make install-mitie && \
-  poetry build -f wheel -n && \
+  poetry install --extras full --no-dev --no-root --no-interaction
+
+RUN pip install wheel && \
+  cd rasa_addons && \
+  mkdir rasa_addons && \
+  mv `\ls -1 . | grep -v -e setup.py -e rasa_addons` ./rasa_addons/ && \
+  python setup.py install && \
+  cd ..
+
+RUN poetry build -f wheel -n && \
   pip install --no-deps dist/*.whl && \
   rm -rf dist *.egg-info
-
-# make sure we use the virtualenv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# spacy link
-RUN python -m spacy download en_core_web_md && \
-    python -m spacy download de_core_news_sm && \
-    python -m spacy link en_core_web_md en && \
-    python -m spacy link de_core_news_sm de
 
 # start a new build stage
 FROM base as runner
@@ -75,13 +67,19 @@ WORKDIR /app
 RUN chgrp -R 0 /app && chmod -R g=u /app
 USER 1001
 
-# Create a volume for temporary data
+# create a volume for temporary data
 VOLUME /tmp
+
+# Create a volume for models
+VOLUME /app/models
 
 # change shell
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # the entry point
 EXPOSE 5005
-ENTRYPOINT ["rasa"]
-CMD ["--help"]
+
+CMD rasa run \
+  $([ -n "$MODEL_PATH" ] && echo "-m $MODEL_PATH") \
+  $([ -n "$AUTH_TOKEN" ] && echo "--auth-token $AUTH_TOKEN" ) \
+  --enable-api --debug

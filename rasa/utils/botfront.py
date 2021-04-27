@@ -1,5 +1,5 @@
 import os
-import yaml
+import rasa
 import logging
 import asyncio
 import time
@@ -104,6 +104,11 @@ def set_endpoints_credentials_args_from_remote(args):
     project_id = os.environ.get("BF_PROJECT_ID")
     if not project_id or not bf_url:
         return
+    here = os.listdir(os.getcwd())
+    if "endpoints.yml" in here and not args.endpoints:
+        args.endpoints = "endpoints.yml"
+    if "credentials.yml" in here and not args.credentials:
+        args.credentials = "credentials.yml"
     if args.endpoints and args.credentials:
         return
 
@@ -117,9 +122,9 @@ def set_endpoints_credentials_args_from_remote(args):
 
     if not args.endpoints:
         with tempfile.NamedTemporaryFile(mode="w", delete=False) as yamlfile:
-            yaml.dump(config["endpoints"], yamlfile)
+            rasa.shared.utils.io.write_yaml(config["endpoints"], yamlfile.name)
             args.endpoints = yamlfile.name
     if not args.credentials:
         with tempfile.NamedTemporaryFile(mode="w", delete=False) as yamlfile:
-            yaml.dump(config["credentials"], yamlfile)
+            rasa.shared.utils.io.write_yaml(config["credentials"], yamlfile.name)
             args.credentials = yamlfile.name
